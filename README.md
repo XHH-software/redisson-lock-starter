@@ -78,6 +78,16 @@ public void deduct(Long skuId, int count) {
 
 ### 1. 引入依赖
 
+组件尚未发布到 Maven 中央仓库，先克隆到本地安装一次：
+
+```bash
+git clone https://github.com/XHH-software/redisson-lock-starter.git
+cd redisson-lock-starter
+mvn clean install -DskipTests
+```
+
+然后在业务项目中引入：
+
 ```xml
 <dependency>
     <groupId>com.xhh</groupId>
