@@ -70,6 +70,7 @@ public void deduct(Long skuId, int count) {
 | 事务感知释放 | 锁不会早于事务结束释放，无论切面谁在外层 |
 | 失败可观测 | 获取失败抛 `LockAcquireException`（带 key），可选 warn 日志 |
 | 零配置接入 | 引入依赖 + `spring.redis.*` 即可，无 `@EnableXxx` |
+| 真实集成测试 | Testcontainers 拉起真实 Redis，CI 上全量执行而非跳过 |
 
 ---
 
@@ -307,6 +308,9 @@ mvn test
 本机没有 Docker 时，`@Testcontainers(disabledWithoutDocker = true)` 会自动跳过集成测试，
 `mvn test` 仍然是绿的——**不会因为环境缺失把构建搞红**。
 
+CI（`.github/workflows/ci.yml`）跑在 GitHub 的 ubuntu runner 上，自带 Docker，
+所以那 6 个集成用例在 CI 里是**真实执行**的，可以在 Actions 页面看到绿勾。
+
 | 用例 | 验证点 |
 |---|---|
 | `shouldRejectWhenLockHeld` | 锁被占用时，`waitTime = 0` 立即失败 |
@@ -336,6 +340,16 @@ src/main/java/com/xhh/lock/
 └── exception/
     ├── LockAcquireException.java    # 抢锁失败
     └── LockKeyParseException.java   # 表达式解析失败
+```
+
+```
+src/test/java/com/xhh/lock/
+├── core/LockKeyParserTest.java      # SpEL 解析单测，不需要 Redis
+└── test/
+    ├── TestApplication.java         # 验证「无 @EnableXxx 也能装配」
+    ├── DemoService.java             # 加锁 / 等待 / 事务 / 重入 用例
+    ├── InnerService.java            # 可重入的跨 Bean 调用
+    └── LockAspectIntegrationTest.java
 ```
 
 ---
