@@ -27,6 +27,27 @@ jobs:
       - name: Build and run all tests
         run: mvn -B verify
 
+      # 关键一步：断言集成测试真的执行了。
+      # 因为测试类上有 @Testcontainers(disabledWithoutDocker = true)，
+      # 一旦 runner 上没有 Docker，surefire 会把整个类标记为 Skipped，构建依然是绿的。
+      # 那样 green check 就成了假证据，所以这里把它变成硬性失败。
+      - name: Assert integration tests really ran
+        run: |
+          set -e
+          report="target/surefire-reports/com.xhh.lock.test.LockAspectIntegrationTest.txt"
+          if [ ! -f "$report" ]; then
+            echo "::error::未找到集成测试报告 $report，测试类可能根本没被扫描到"
+            exit 1
+          fi
+          echo "---------- $report ----------"
+          cat "$report"
+          echo "-----------------------------"
+          if grep -q "Skipped: 1" "$report" || ! grep -q "Tests run: 6, Failures: 0, Errors: 0, Skipped: 0" "$report"; then
+            echo "::error::集成测试被跳过或未全部通过 —— 通常是 runner 上没有 Docker，green check 不可信"
+            exit 1
+          fi
+          echo "OK: 6 个集成用例全部真实执行，无跳过"
+
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
