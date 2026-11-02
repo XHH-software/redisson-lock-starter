@@ -9,8 +9,23 @@ on:
 
 jobs:
   build:
-    name: Build & Test (JDK 11, Redis via Testcontainers)
-    runs-on: ubuntu-latest
+    name: Build & Test (JDK 11, Redis service)
+    # 固定镜像版本而不是 ubuntu-latest：latest 会随 GitHub 的镜像迁移悄悄换环境，
+    # 2026-10 起陆续切到 Ubuntu 26 之后，Testcontainers 在部分 runner 上探测不到 Docker，
+    # 集成测试被静默跳过。锁定版本可以避免这类「环境一换、绿勾变灰」的漂移。
+    runs-on: ubuntu-24.04
+
+    # Redis 由 Actions 的 service container 提供，不经过 Testcontainers 的 Docker 探测。
+    # 测试类优先读 TEST_REDIS_HOST，读到就用这个实例，探测失败也不会把测试静默跳过。
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+
+    env:
+      TEST_REDIS_HOST: 127.0.0.1
+      TEST_REDIS_PORT: "6379"
 
     steps:
       - uses: actions/checkout@v4
@@ -22,28 +37,42 @@ jobs:
           java-version: '11'
           cache: maven
 
-      # GitHub 的 ubuntu runner 自带 Docker，Testcontainers 会真实拉起 redis:7.4-alpine，
-      # 所以集成测试在 CI 上是实际执行的，而不是被跳过。
+      - name: Wait for Redis
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/6379) 2>/dev/null; then
+              echo "Redis 已就绪（等待 $((i-1)) 秒）"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error title=Redis 未就绪::service container 未能在 30 秒内监听 6379"
+          exit 1
+
       - name: Build and run all tests
         run: mvn -B verify
 
       # 关键一步：断言集成测试真的执行了。
-      # 因为测试类上有 @Testcontainers(disabledWithoutDocker = true)，
-      # 一旦 runner 上没有 Docker，surefire 会把整个类标记为 Skipped，构建依然是绿的。
-      # 那样 green check 就成了假证据，所以这里把它变成硬性失败。
+      # 测试类的 Redis 有两条来源，任何一条降级为「跳过」，构建都必须变红——
+      # 否则 green check 就成了假证据。这里把「跳过」和「少跑」区分为不同的报错。
       - name: Assert integration tests really ran
         run: |
           set -e
           report="target/surefire-reports/com.xhh.lock.test.LockAspectIntegrationTest.txt"
           if [ ! -f "$report" ]; then
-            echo "::error::未找到集成测试报告 $report，测试类可能根本没被扫描到"
+            echo "::error title=集成测试报告缺失::未找到 $report，测试类可能根本没被扫描到"
             exit 1
           fi
           echo "---------- $report ----------"
           cat "$report"
           echo "-----------------------------"
-          if grep -q "Skipped: 1" "$report" || ! grep -q "Tests run: 6, Failures: 0, Errors: 0, Skipped: 0" "$report"; then
-            echo "::error::集成测试被跳过或未全部通过 —— 通常是 runner 上没有 Docker，green check 不可信"
+          summary=$(grep -m1 'Tests run' "$report" || echo "报告中没有 Tests run 行")
+          if echo "$summary" | grep -q "Skipped: [1-9]"; then
+            echo "::error title=集成测试被跳过::$summary — Redis 未连接成功，测试类被整体禁用"
+            exit 1
+          fi
+          if ! echo "$summary" | grep -q "Tests run: 6, Failures: 0, Errors: 0, Skipped: 0"; then
+            echo "::error title=集成测试未全部执行::$summary — 期望 6 个用例全部通过且无跳过"
             exit 1
           fi
           echo "OK: 6 个集成用例全部真实执行，无跳过"

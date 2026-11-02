@@ -70,7 +70,7 @@ public void deduct(Long skuId, int count) {
 | 事务感知释放 | 锁不会早于事务结束释放，无论切面谁在外层 |
 | 失败可观测 | 获取失败抛 `LockAcquireException`（带 key），可选 warn 日志 |
 | 零配置接入 | 引入依赖 + `spring.redis.*` 即可，无 `@EnableXxx` |
-| 真实集成测试 | Testcontainers 拉起真实 Redis，CI 上全量执行而非跳过 |
+| 真实集成测试 | 真实 Redis 跑互斥、重入、事务释放；本地用 Testcontainers，CI 用 service container，断言防止测试被静默跳过 |
 
 ---
 
@@ -325,15 +325,24 @@ if (!rLock.isHeldByCurrentThread()) {
 # 只跑单测（不需要 Redis）
 mvn test -Dtest=LockKeyParserTest
 
-# 全量（需要 Docker，Testcontainers 会拉起 redis:7.4-alpine）
+# 全量：本机有 Docker 时，Testcontainers 拉起 redis:7.4-alpine
 mvn test
+
+# 也可以指向现成的 Redis，跳过容器
+TEST_REDIS_HOST=127.0.0.1 TEST_REDIS_PORT=6379 mvn test
 ```
 
-本机没有 Docker 时，`@Testcontainers(disabledWithoutDocker = true)` 会自动跳过集成测试，
-`mvn test` 仍然是绿的——**不会因为环境缺失把构建搞红**。
+Redis 的来源按优先级取：`TEST_REDIS_HOST` > 本机 Docker（Testcontainers）> 跳过。
+两者都没有时集成测试整体跳过，`mvn test` 仍然是绿的——不会因为环境缺失把构建搞红。
 
-CI（`.github/workflows/ci.yml`）跑在 GitHub 的 ubuntu runner 上，自带 Docker，
-所以那 6 个集成用例在 CI 里是**真实执行**的，可以在 Actions 页面看到绿勾。
+CI 不走这条链：`.github/workflows/ci.yml` 用 service container 起 `redis:7.4-alpine`，
+把地址注入 `TEST_REDIS_HOST`，完全不经过 Testcontainers 的 Docker 探测。
+
+这样改是因为「探测不到 Docker」和「真的没有 Docker」是两件事。2026-10 GitHub 开始把
+`ubuntu-latest` 迁到新镜像，runner 上 Docker 明明在，Testcontainers 1.19.7 却握手失败，
+`disabledWithoutDocker = true` 把整个测试类静默跳过，`mvn verify` 照样绿——绿勾成了假证据。
+service container 由 Actions 自己拉起，不经过这层探测；断言步骤再用 surefire 报告里的
+`Tests run / Skipped` 兜一道，跳过就一定红。
 
 | 用例 | 验证点 |
 |---|---|

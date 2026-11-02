@@ -3,15 +3,15 @@ package com.xhh.lock.test;
 import com.xhh.lock.exception.LockAcquireException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIf;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -27,22 +27,48 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * 真实 Redis 下的集成测试。
  *
- * <p>{@code disabledWithoutDocker = true}：本机没装 Docker 时自动跳过，
- * 不会让 {@code mvn test} 变红；CI 里装了 Docker 就会真实执行。
+ * <p>Redis 来源有两种，按优先级：
+ * <ol>
+ *   <li>环境变量 {@code TEST_REDIS_HOST} 指向的现成实例（CI 用 GitHub Actions 的
+ *       service container 提供）；</li>
+ *   <li>本机 Docker，用 Testcontainers 拉起 {@code redis:7.4-alpine}。</li>
+ * </ol>
+ *
+ * <p>两条都不满足时整个类跳过，保证没有 Docker 的机器上 {@code mvn test} 依然是绿的。
+ *
+ * <p>为什么 CI 不再依赖 Testcontainers 探测 Docker：{@code @Testcontainers(disabledWithoutDocker = true)}
+ * 的语义是「探测不到 Docker 就跳过」，而「探测不到」和「真的没有」是两件事——runner 镜像里
+ * Docker 明明在，只是 Testcontainers 的客户端握手失败，测试也会被静默跳过，构建照样绿。
+ * service container 由 Actions 自己拉起并做健康检查，不经过这层探测，结果更可信。
  */
-@Testcontainers(disabledWithoutDocker = true)
+@EnabledIf("redisAvailable")
 @SpringBootTest(classes = TestApplication.class)
 class LockAspectIntegrationTest {
 
-    @Container
-    @SuppressWarnings("resource")
-    static final GenericContainer<?> REDIS = new GenericContainer<>("redis:7.4-alpine")
-            .withExposedPorts(6379);
+    private static final String EXTERNAL_HOST = System.getenv("TEST_REDIS_HOST");
+    private static final String EXTERNAL_PORT =
+            System.getenv().getOrDefault("TEST_REDIS_PORT", "6379");
+
+    private static GenericContainer<?> redis;
+
+    static boolean redisAvailable() {
+        if (EXTERNAL_HOST != null && !EXTERNAL_HOST.isEmpty()) {
+            return true;
+        }
+        return DockerClientFactory.instance().isDockerAvailable();
+    }
 
     @DynamicPropertySource
     static void redisProperties(DynamicPropertyRegistry registry) {
-        registry.add("spring.redis.host", REDIS::getHost);
-        registry.add("spring.redis.port", () -> REDIS.getMappedPort(6379));
+        if (EXTERNAL_HOST != null && !EXTERNAL_HOST.isEmpty()) {
+            registry.add("spring.redis.host", () -> EXTERNAL_HOST);
+            registry.add("spring.redis.port", () -> EXTERNAL_PORT);
+            return;
+        }
+        redis = new GenericContainer<>("redis:7.4-alpine").withExposedPorts(6379);
+        redis.start();
+        registry.add("spring.redis.host", redis::getHost);
+        registry.add("spring.redis.port", () -> redis.getMappedPort(6379));
     }
 
     @Autowired
