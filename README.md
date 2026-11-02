@@ -161,6 +161,15 @@ public @interface Lock {
 
 **key 会统一拼接全局前缀**（默认 `lock:`）。所以 `@Lock(key = "#id")` 在 Redis 里的实际 key 是 `lock:42`。
 
+**key 的求值结果必须是标量**——String / 数字 / 布尔 / 字符 / 枚举 / UUID / 时间类型，或者是自己重写了 `toString()` 的值对象。直接拿一个普通对象当 key 会被拒绝：
+
+```java
+@Lock(key = "#order")      // ✗ 抛 LockKeyParseException，提示改用 #order.id
+@Lock(key = "#order.id")   // ✓
+```
+
+这条限制不是洁癖。`String.valueOf(order)` 对没重写 `toString()` 的类走的是 `Object#toString`，结果形如 `Order@6f2b958e`——**hashCode 每次调用都不一样**。同一笔订单的十次请求会拿到十把完全不同的锁，本该互斥的临界区彻底失效，而且不抛任何异常：日志正常、返回值正常、数据慢慢错。这类问题只能靠事后复盘发现，所以宁可在入口直接拒掉。
+
 ### 用法示例
 
 ```java
@@ -224,9 +233,11 @@ xhh:
 ```java
 if (expression.contains("#{")) {
     // 模板：必须传 TemplateParserContext，否则 SpEL 会把 #{...} 当普通字符
+    // 拼接前先逐个校验占位符的求值类型，否则类型信息在拼接那一步就丢了
+    assertPlaceholdersAreKeys(expression, context);
     value = parser.parseExpression(expression, TEMPLATE_CONTEXT).getValue(context, String.class);
 } else {
-    value = parser.parseExpression(expression).getValue(context);
+    value = toKey(parser.parseExpression(expression).getValue(context), expression);
 }
 ```
 
@@ -234,6 +245,9 @@ if (expression.contains("#{")) {
 
 - **解析结果为 `null` 直接抛异常**，而不是拼出 `lock:null` 去操作 Redis——
   那样所有解析失败的方法会挤在同一把锁上，表面正常、实际完全丧失互斥。
+- **求值结果必须是标量**，对象要么显式取字段（`#order.id`），要么自己重写 `toString()`。
+  直接拿普通对象当 key 会得到 `Order@6f2b958e`，hashCode 每次调用都变，
+  等于每个请求一把新锁，而且不报错——这条是审代码时补的，原因见上面的「key 的求值结果必须是标量」。
 - **key 为空时退化为 `类名#方法名`**，保证至少是方法级互斥。
 - 异常统一包装成 `LockKeyParseException`，不把 SpEL 内部的 `SpelEvaluationException` 泄漏到业务层。
 
@@ -329,7 +343,7 @@ CI（`.github/workflows/ci.yml`）跑在 GitHub 的 ubuntu runner 上，自带 D
 | `shouldReleaseLockAfterRollback` | 事务回滚后锁被释放，不会永久占用 |
 | `shouldReleaseLockAfterCommit` | 事务提交后锁被释放 |
 | `shouldUseConfiguredKeyPrefix` | 全局前缀生效 |
-| `LockKeyParserTest` × 7 | SpEL / 模板 / 空 key / 空前缀 / null 结果 / 语法错误 |
+| `LockKeyParserTest` × 12 | SpEL / 模板 / 空 key / 空前缀 / null 结果 / 语法错误 / 对象当 key 被拒（含模板内占位符） / 重写 toString 的值对象放行 / 时间与枚举放行 |
 
 ---
 
